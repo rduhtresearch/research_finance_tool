@@ -1,0 +1,15 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# OS
+.DS_Store
+
+# Database
+*.duckdb
+data/duckdb/
+
+# Large exports
+output/
+*.csv
