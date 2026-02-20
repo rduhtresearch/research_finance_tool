@@ -10,6 +10,7 @@ library(tidyr)
 library(stringr)
 library(purrr)
 library(readr)
+library(openxlsx)
 
 # -----------------------------
 # 1) User settings
@@ -17,7 +18,7 @@ library(readr)
 
 DB_PATH <- "finance_rules_AH.duckdb"
 
-ICT_CSV_PATH <- "C:/path/to/ict.csv"   # <-- change this to your ICT export CSV
+ICT_CSV_PATH <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/test.xlsx"   # <-- change this to your ICT export CSV
 
 ruleset_id <- "COMM_AH_V1"
 
@@ -30,7 +31,7 @@ mff_rate <- 1.08
 # -----------------------------
 # 2) Read ICT
 # -----------------------------
-df <- read_csv(ICT_CSV_PATH, show_col_types = FALSE)
+df <- read.xlsx(ICT_CSV_PATH)
 
 # Ensure stable row_id
 if (!"row_id" %in% names(df)) df$row_id <- seq_len(nrow(df))
@@ -38,7 +39,7 @@ if (!"row_id" %in% names(df)) df$row_id <- seq_len(nrow(df))
 # -----------------------------
 # 3) Required columns check
 # -----------------------------
-required <- c("Activity Type", "Staff Role", "Activity Cost")
+required <- c("Activity.Type", "Staff.Role", "Activity.Cost")
 missing <- setdiff(required, names(df))
 if (length(missing) > 0) stop(paste("Missing required columns:", paste(missing, collapse = ", ")))
 
@@ -111,17 +112,17 @@ condition_passes <- function(condition_field, condition_op, condition_value, is_
 # 7) Build posting lines per base row (dist_rules)
 # -----------------------------
 posting_plan <- df %>%
-  select(row_id, scenario_id, row_category, is_medic, provider_org, pi_org, `Activity Cost`) %>%
+  select(row_id, scenario_id, row_category, is_medic, provider_org, pi_org, `Activity.Cost`) %>%
   mutate(
     # Ensure numeric Activity Cost (strip currency symbols/commas)
-    activity_cost_num = as.numeric(gsub("[^0-9.]", "", .data$`Activity Cost`))
+    activity_cost_num = as.numeric(gsub("[^0-9.]", "", .data$`Activity.Cost`))
   ) %>%
   rowwise() %>%
   mutate(
     posting_lines = list({
       # candidate rules for this row
       cand <- dist_rules %>%
-        filter(.data$scenario_id == scenario_id, .data$row_category == row_category) %>%
+        filter(.data$scenario_id == .env$scenario_id, .data$row_category == .env$row_category) %>%
         mutate(
           ok = purrr::pmap_lgl(
             list(condition_field, condition_op, condition_value),
