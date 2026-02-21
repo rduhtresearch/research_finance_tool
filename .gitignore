@@ -7,8 +7,8 @@
 .DS_Store
 
 # Database
-*.duckdb
-data/duckdb/
+#*.duckdb
+#data/duckdb/
 
 # Large exports
 output/

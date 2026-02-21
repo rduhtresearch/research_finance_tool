@@ -1,4 +1,4 @@
-# -----------------------------
+ls# -----------------------------
 # 01_build_rules_db_AH.R
 # Build + seed DuckDB rules DB for Scenarios A–H
 # -----------------------------
@@ -8,6 +8,7 @@ library(DBI)
 library(duckdb)
 
 # 2) Where the DB file lives
+setwd('/Users/tategraham/Documents/NHS/research_finance_tool/data')
 DB_PATH <- "finance_rules_AH.duckdb"
 
 # 3) Connect (creates file if missing)
@@ -20,12 +21,13 @@ exec_sql <- function(sql) dbExecute(con, sql)
 # -----------------------------
 # 5) Drop tables to rebuild cleanly (repeatable dev)
 # -----------------------------
-exec_sql("DROP TABLE IF EXISTS rulesets;")
-exec_sql("DROP TABLE IF EXISTS posting_line_types;")
+# Drop dependent tables first (children), then parents
 exec_sql("DROP TABLE IF EXISTS dist_rules;")
-exec_sql("DROP TABLE IF EXISTS amount_map;")
 exec_sql("DROP TABLE IF EXISTS routing_rules;")
+exec_sql("DROP TABLE IF EXISTS amount_map;")
 exec_sql("DROP TABLE IF EXISTS provider_orgs;")
+exec_sql("DROP TABLE IF EXISTS posting_line_types;")
+exec_sql("DROP TABLE IF EXISTS rulesets;")
 
 # -----------------------------
 # 6) Create tables (prod-shaped but minimal)
@@ -218,6 +220,7 @@ insert_dist_rule <- function(id, scenario, row_category, posting_line, priority,
 # 9.1) Convenience vectors
 baseline_std <- c("DIRECT", "CAPACITY_RD", "INDIRECT_50_DELIVERY", "INDIRECT_25_TRUST", "INDIRECT_25_PI")
 invest_std <- c("DIRECT", "CAPACITY_RD")
+training_std <- baseline_std
 
 # 9.2) Scenarios that behave like A in terms of "which lines exist":
 # A, C, E, G, H  (routing differs; G/H are external but still show splits per your choice)
@@ -234,6 +237,13 @@ for (sc in like_A) {
   pr <- 10
   for (pl in invest_std) {
     insert_dist_rule(paste0(sc, "_INV_", pl), sc, "INVESTIGATION", pl, pr)
+    pr <- pr + 10
+  }
+  
+  # TRAINING_FEE: behaves like baseline standard lines (MVP)
+  pr <- 10
+  for (pl in training_std) {
+    insert_dist_rule(paste0(sc, "_TRAIN_", pl), sc, "TRAINING_FEE", pl, pr)
     pr <- pr + 10
   }
 }
@@ -254,6 +264,14 @@ for (sc in trd_scenarios) {
     )
     pr <- pr + 10
   }
+  
+  # training fee override lines
+  pr_train <- 10
+  for (pl in baseline_std) {
+    insert_dist_rule(paste0(sc, "_TRAIN_", pl), sc, "TRAINING_FEE", pl, pr_train)
+    pr_train <- pr_train + 10
+  }
+  
 
   # BASELINE medic: TRD split + capacity + indirect lines (no DIRECT)
   insert_dist_rule(paste0(sc, "_BASE_MED_DIRECT40"), sc, "BASELINE", "DIRECT_40_PI", 5,

@@ -16,7 +16,7 @@ library(openxlsx)
 # 1) User settings
 # -----------------------------
 
-DB_PATH <- "finance_rules_AH.duckdb"
+DB_PATH <- "/Users/tategraham/Documents/NHS/research_finance_tool/data/finance_rules_AH.duckdb"
 
 ICT_CSV_PATH <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/test.xlsx"   # <-- change this to your ICT export CSV
 
@@ -51,19 +51,42 @@ if (!"pi_org" %in% names(df)) df$pi_org <- NA_character_
 # -----------------------------
 # 4) Normalize + derive row context
 # -----------------------------
+
+# Optional manual override column (populated later by UI)
+if (!"calc_tag" %in% names(df)) df$calc_tag <- NA_character_
+
 df <- df %>%
   mutate(
-    activity_type_norm = str_to_lower(str_trim(.data$`Activity Type`)),
-    staff_role_norm    = str_to_lower(str_trim(.data$`Staff Role`)),
+    activity_type_norm = str_to_lower(str_trim(.data$`Activity.Type`)),
+    staff_role_norm    = str_to_lower(str_trim(.data$`Staff.Role`)),
     
-    # Row category: only Investigation vs Procedure for now
-    row_category = if_else(str_detect(activity_type_norm, "^investigation$|investigation"), "INVESTIGATION", "BASELINE"),
+    # Auto classification (what the engine would do without overrides)
+    row_category_auto = if_else(
+      str_detect(activity_type_norm, "^investigation$|investigation"),
+      "INVESTIGATION",
+      "BASELINE"
+    ),
+    
+    # Normalise calc_tag (blank -> NA)
+    calc_tag = if_else(is.na(calc_tag), NA_character_, str_trim(as.character(calc_tag))),
+    calc_tag = if_else(calc_tag == "", NA_character_, calc_tag),
+    
+    # Effective category used by rules engine
+    row_category = if_else(!is.na(calc_tag), calc_tag, row_category_auto),
     
     # Medic detection: Staff Role equals "Medical Staff"
-    is_medic = (str_trim(.data$`Staff Role`) == "Medical Staff"),
+    is_medic = (str_trim(.data$`Staff.Role`) == "Medical Staff"),
     
     scenario_id = scenario_id,
     ruleset_id = ruleset_id
+  )
+
+test_id <- df |> filter(row_category_auto == "BASELINE") |> slice(1) |> pull(row_id)
+
+df <- df %>%
+  mutate(
+    calc_tag = if_else(row_id == test_id, "TRAINING_FEE", calc_tag),
+    row_category = if_else(!is.na(calc_tag), calc_tag, row_category_auto)
   )
 
 # -----------------------------
@@ -112,7 +135,7 @@ condition_passes <- function(condition_field, condition_op, condition_value, is_
 # 7) Build posting lines per base row (dist_rules)
 # -----------------------------
 posting_plan <- df %>%
-  select(row_id, scenario_id, row_category, is_medic, provider_org, pi_org, `Activity.Cost`) %>%
+  select(row_id, scenario_id, row_category_auto, calc_tag, row_category, is_medic, provider_org, pi_org, `Activity.Cost`) %>%
   mutate(
     # Ensure numeric Activity Cost (strip currency symbols/commas)
     activity_cost_num = as.numeric(gsub("[^0-9.]", "", .data$`Activity.Cost`))
@@ -136,7 +159,7 @@ posting_plan <- df %>%
     })
   ) %>%
   ungroup() %>%
-  select(row_id, scenario_id, row_category, is_medic, provider_org, pi_org, activity_cost_num, posting_lines) %>%
+  select(row_id, scenario_id, row_category_auto, calc_tag, row_category, is_medic, provider_org, pi_org, activity_cost_num, posting_lines) %>%
   unnest(posting_lines) %>%
   rename(posting_line_type_id = posting_lines)
 
@@ -214,12 +237,24 @@ posting_plan <- posting_plan %>%
 # -----------------------------
 out <- posting_plan %>%
   select(
-    row_id, scenario_id, row_category, is_medic,
+    row_id, scenario_id, row_category_auto, calc_tag, row_category, is_medic,
     posting_line_type_id, posting_amount,
     destination_bucket, destination_entity,
     cost_code
   ) %>%
   arrange(row_id, posting_line_type_id)
+
+out %>%
+  filter(row_id == test_id) %>%
+  select(
+    row_id,
+    row_category_auto,
+    calc_tag,
+    row_category,
+    posting_line_type_id,
+    posting_amount,
+    destination_bucket
+  )
 
 write_csv(out, "posting_plan.csv")
 
