@@ -32,6 +32,7 @@ mff_rate <- 1.08
 # 2) Read ICT
 # -----------------------------
 df <- read.xlsx(ICT_CSV_PATH)
+View(df)
 
 # Ensure stable row_id
 if (!"row_id" %in% names(df)) df$row_id <- seq_len(nrow(df))
