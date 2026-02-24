@@ -10,11 +10,11 @@ library(openxlsx)
 
 DB_PATH <- "/Users/tategraham/Documents/NHS/research_finance_tool/data/finance_rules_AH.duckdb"
 
-ICT_CSV_PATH <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data.xlsx"   # <-- change this to your ICT export CSV
+ICT_CSV_PATH <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/testing_data2.xlsx"   # <-- change this to your ICT export CSV
 
 
 df <- read.xlsx(ICT_CSV_PATH)
-View(df)
+View(df$SheetName)
 
 df_long <- df %>%
   pivot_longer(

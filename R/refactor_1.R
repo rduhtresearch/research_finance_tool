@@ -132,6 +132,9 @@ extract_mff_lookup <- function(df, sheet_name, study_value, cpms_id) {
   
   names(tdf)[1] <- "ICT_Cost"
   
+  # Coerce ICT_Cost to numeric to ensure type consistency when binding with other tables
+  tdf$ICT_Cost <- as.numeric(as.character(tdf$ICT_Cost)) 
+  
   tdf %>% select(CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Name, ICT_Cost)
 }
 
@@ -294,7 +297,11 @@ run_join_refactor <- function(input_file, output_file) {
 }
 
 # file paths
-input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/candy study.xlsx"
-output_file <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data.xlsx"
+#input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/candy study.xlsx"
+input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/test_study.xlsx"
+output_file <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/testing_data2.xlsx"
 
 run_join_refactor(input_file, output_file)
+
+
+
