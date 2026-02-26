@@ -5,7 +5,7 @@
 
 library(DBI)
 library(duckdb)
-library(dplyr)lines
+library(dplyr)
 library(tidyr)
 library(stringr)
 library(purrr)

@@ -181,7 +181,7 @@ expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_valu
         Study       = rep(study_value, n),
         Visit_Number= rep(paste("VISIT -", sprintf("%03d", j)), n),
         Study_Arm   = rep(study_arm_value, n),
-        #Visit_Name  = rep(visit_cols[j], n),
+        Visit_Name  = rep(visit_cols[j], n),
         Visit_Name   = rep(df$Activity[i], n),  # ← activity name, repeated n times
         ICT_Cost    = rep(cost_per_occ[i], n),
         stringsAsFactors = FALSE
