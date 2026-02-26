@@ -12,6 +12,8 @@
 #   - A new entry function process_workbook() wires the two stages together.
 #   - All other logic is identical to the originals — no renames, no rewrites.
 
+source('/Users/tategraham/Documents/NHS/research_finance_tool/R/utils/add_study_arm.r')
+
 suppressPackageStartupMessages({
   library(openxlsx)
   library(dplyr)
@@ -143,6 +145,9 @@ extract_mff_lookup <- function(df, sheet_name, study_value, cpms_id) {
   
   tdf$ICT_Cost <- as.numeric(as.character(tdf$ICT_Cost))
   
+  # ── Normalise Study_Arm labels to match pipeline conventions ──
+  tdf$Study_Arm <- ifelse(tdf$Study_Arm == "Setup & Closedown", "SC", tdf$Study_Arm)
+  
   tdf %>% select(CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Name, ICT_Cost)
 }
 
@@ -176,7 +181,8 @@ expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_valu
         Study       = rep(study_value, n),
         Visit_Number= rep(paste("VISIT -", sprintf("%03d", j)), n),
         Study_Arm   = rep(study_arm_value, n),
-        Visit_Name  = rep(visit_cols[j], n),
+        #Visit_Name  = rep(visit_cols[j], n),
+        Visit_Name   = rep(df$Activity[i], n),  # ← activity name, repeated n times
         ICT_Cost    = rep(cost_per_occ[i], n),
         stringsAsFactors = FALSE
       )
@@ -190,6 +196,9 @@ build_ua_ssp_lookup_from_sheet <- function(df, study_value, cpms_id) {
   if (!("Flag" %in% names(df))) return(tibble())
   
   out <- list()
+  
+  df_sc <- df %>% filter(Flag == "Setup & Closedown")
+  if (nrow(df_sc) > 0) out[["SC"]] <- expand_to_visit_rows_legacy(df_sc, study_value, cpms_id, "SC")
   
   df_ssp <- df %>% filter(Flag == "Scheduled / Some Participants")
   if (nrow(df_ssp) > 0) out[["SSP"]] <- expand_to_visit_rows_legacy(df_ssp, study_value, cpms_id, "SSP")
@@ -327,7 +336,8 @@ run_stage_a <- function(input_file, db_dir = NULL) {
   drop_end   <- total_idx - 1
   
   if (drop_start <= drop_end) data <- data[, -(drop_start:drop_end), drop = FALSE]
-  if ("VISIT.-.001" %in% names(data)) data[["VISIT.-.001"]] <- 1L
+  #if ("VISIT.-.001" %in% names(data)) data[["VISIT.-.001"]] <- 1L
+  if ("VISIT - 001" %in% names(data)) data[["VISIT - 001"]] <- 1L
   
   data
 }
@@ -423,6 +433,10 @@ process_workbook <- function(input_path, archive_dir = NULL, export_path = NULL,
   message("--- Stage B: reshaping to long format ---")
   df_long <- run_stage_b(df = stage_a_result$processed_sheets)
   
+  # Post-processing: append Study_Arm to each sheet
+  message("--- Post-processing: adding Study_Arm ---")
+  df_long <- add_study_arm(df_long)
+  
   # Optional: write final export
   if (!is.null(export_path)) {
     write.xlsx(df_long, file = export_path, rowNames = FALSE)
@@ -432,7 +446,6 @@ process_workbook <- function(input_path, archive_dir = NULL, export_path = NULL,
   message("--- Pipeline complete ---")
   invisible(df_long)
 }
-
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 # input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/test_study.xlsx"
