@@ -19,7 +19,7 @@ library(openxlsx)
 DB_PATH <- "/Users/tategraham/Documents/NHS/research_finance_tool/data/finance_rules_AH.duckdb"
 
 #ICT_CSV_PATH <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/test.xlsx"   # <-- change this to your ICT export CSV
-ICT_CSV_PATH <-'/Users/tategraham/Documents/NHS/file1788327344760.xlsx'
+ICT_CSV_PATH <-'/Users/tategraham/Documents/NHS/file19f736106ee0.xlsx'
 
 ruleset_id <- "COMM_AH_V1"
 
@@ -33,7 +33,6 @@ mff_rate <- 1.08
 # 2) Read ICT
 # -----------------------------
 df <- read.xlsx(ICT_CSV_PATH)
-View(df)
 
 # Ensure stable row_id
 if (!"row_id" %in% names(df)) df$row_id <- seq_len(nrow(df))
@@ -115,6 +114,8 @@ routing_rules <- dbGetQuery(con, "
   FROM routing_rules
   WHERE ruleset_id = ?
 ", params = list(ruleset_id))
+# After section 4 (normalize + derive row context)
+# Before section 7 (build posting lines)
 
 # -----------------------------
 # 6) Rule evaluator: conditions (only supports is_medic = TRUE/FALSE right now)
@@ -137,8 +138,9 @@ condition_passes <- function(condition_field, condition_op, condition_value, is_
 # 7) Build posting lines per base row (dist_rules)
 # -----------------------------
 posting_plan <- df %>%
-  select(Visit, Activity, cpms_id, study_name, row_id, scenario_id, row_category_auto, calc_tag, 
-         row_category, is_medic, provider_org, pi_org, `Activity.Cost`) %>%
+  select(Visit, Activity, Study_Arm, cpms_id, study_name, row_id, scenario_id, 
+         row_category_auto, activity_occurrence_id, calc_tag, row_category, is_medic, provider_org, pi_org, 
+         `Activity.Cost`) %>%
   mutate(
     # Ensure numeric Activity Cost (strip currency symbols/commas)
     activity_cost_num = as.numeric(gsub("[^0-9.]", "", .data$`Activity.Cost`))
@@ -163,7 +165,7 @@ posting_plan <- df %>%
   ) %>%
   ungroup() %>%
   select(Visit, Activity, cpms_id, study_name, row_id, scenario_id, row_category_auto, calc_tag, 
-         row_category, is_medic, provider_org, pi_org, activity_cost_num, posting_lines) %>%
+         row_category, activity_occurrence_id, is_medic, provider_org, pi_org, activity_cost_num, posting_lines) %>%
   unnest(posting_lines) %>%
   rename(posting_line_type_id = posting_lines)
 
@@ -176,7 +178,7 @@ posting_plan <- posting_plan %>%
   mutate(
     # Validate mapping exists
     missing_amount_map = is.na(base_mult) | is.na(split_mult),
-    
+
     # Calculate amount
     posting_amount = activity_cost_num * mff_rate * base_mult * split_mult
   )
@@ -242,7 +244,7 @@ posting_plan <- posting_plan %>%
 # -----------------------------
 out <- posting_plan %>%
   select(
-    row_id, scenario_id, row_category_auto, calc_tag, row_category, is_medic,
+    row_id, activity_occurrence_id, scenario_id, row_category_auto, calc_tag, row_category, is_medic,
     cpms_id, study_name, Activity, Visit, posting_line_type_id, posting_amount,
     destination_bucket, destination_entity,
     cost_code

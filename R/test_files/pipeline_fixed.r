@@ -155,7 +155,9 @@ extract_mff_lookup <- function(df, sheet_name, study_value, cpms_id) {
     rename(Visit_Label = Visit_Name) %>%
     mutate(Activity_Name = NA_character_)
   
-  tdf %>% select(CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost)
+  tdf %>%
+    select(CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost) %>%
+    mutate(activity_occurrence_id = NA_integer_)
 }
 
 expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_value, visit_label_lookup = NULL) {
@@ -199,19 +201,28 @@ expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_valu
       }
       
       rows[[length(rows) + 1]] <- data.frame(
-        CPMS_ID      = rep(cpms_id, n),
-        Study        = rep(study_value, n),
-        Visit_Number = rep(visit_number, n),
-        Study_Arm    = rep(study_arm_value, n),
-        Visit_Label  = rep(visit_label, n),      # ← visit dimension (was Visit_Name, overloaded)
-        Activity_Name = rep(df$Activity[i], n),  # ← activity dimension (always the activity)
-        ICT_Cost     = rep(cost_per_occ[i], n),
+        CPMS_ID                = rep(cpms_id, n),
+        Study                  = rep(study_value, n),
+        Visit_Number           = rep(visit_number, n),
+        Study_Arm              = rep(study_arm_value, n),
+        Visit_Label            = rep(visit_label, n),
+        Activity_Name          = rep(df$Activity[i], n),
+        ICT_Cost               = rep(cost_per_occ[i], n),
+        activity_occurrence_id = seq_len(n),
         stringsAsFactors = FALSE
       )
     }
     out_list[[i]] <- bind_rows(rows)
   }
-  bind_rows(out_list)
+  result <- bind_rows(out_list)
+  
+  result <- result %>%
+    group_by(Visit_Number, Activity_Name) %>%
+    mutate(activity_occurrence_id = row_number()) %>%
+    ungroup() %>%
+    as.data.frame()
+  
+  result
 }
 
 build_ua_ssp_lookup_from_sheet <- function(df, study_value, cpms_id, visit_label_lookup = NULL) {
@@ -245,30 +256,36 @@ persist_ict_to_duckdb <- function(db_path, ict_cost_table) {
   DBI::dbExecute(con, "DROP TABLE IF EXISTS ict_costing_tbl")
   
   DBI::dbExecute(con, "
-      CREATE TABLE IF NOT EXISTS ict_costing_tbl (
-      CPMS_ID       VARCHAR NOT NULL,
-      Study         VARCHAR,
-      Visit_Number  VARCHAR NOT NULL,
-      Study_Arm     VARCHAR NOT NULL,
-      Visit_Label   VARCHAR,          -- human-readable visit name (e.g. Screening, Day 30)
-      Activity_Name VARCHAR,          -- activity within the visit (NULL for MFF summary rows)
-      ICT_Cost      DOUBLE  NOT NULL
+    CREATE TABLE IF NOT EXISTS ict_costing_tbl (
+      CPMS_ID                VARCHAR NOT NULL,
+      Study                  VARCHAR,
+      Visit_Number           VARCHAR NOT NULL,
+      Study_Arm              VARCHAR NOT NULL,
+      Visit_Label            VARCHAR,          -- human-readable visit name (e.g. Screening, Day 30)
+      Activity_Name          VARCHAR,          -- activity within the visit (NULL for MFF summary rows)
+      ICT_Cost               DOUBLE  NOT NULL,
+      activity_occurrence_id INTEGER           -- NULL for MFF summary rows
     )
   ")
   
   DBI::dbWriteTable(con, "stg_ict_costing_tbl", ict_cost_table, overwrite = TRUE)
   
   DBI::dbExecute(con, "
-      DELETE FROM ict_costing_tbl t
-      USING stg_ict_costing_tbl s
-      WHERE t.CPMS_ID = s.CPMS_ID
-       AND t.Visit_Number = s.Visit_Number
-       AND t.Study_Arm = s.Study_Arm
+    DELETE FROM ict_costing_tbl t
+    USING stg_ict_costing_tbl s
+    WHERE t.CPMS_ID = s.CPMS_ID
+      AND t.Visit_Number = s.Visit_Number
+      AND t.Study_Arm = s.Study_Arm
   ")
   
   DBI::dbExecute(con, "
-    INSERT INTO ict_costing_tbl (CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost)
-    SELECT CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost
+    INSERT INTO ict_costing_tbl (
+      CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost,
+      activity_occurrence_id
+    )
+    SELECT
+      CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost,
+      activity_occurrence_id
     FROM stg_ict_costing_tbl
   ")
   
@@ -475,6 +492,29 @@ process_workbook <- function(input_path, archive_dir = NULL, export_path = NULL,
   # Post-processing: append Study_Arm to each sheet
   message("--- Post-processing: adding Study_Arm ---")
   df_long <- add_study_arm(df_long)
+  
+  # Post-processing: assign activity_occurrence_id
+  # UA/SC/SSP rows: all occurrences = 1 (activity appears once per visit context)
+  # Scheduled arm rows: occurrence counter within (Study_Arm, Activity, Visit)
+  message("--- Post-processing: assigning activity_occurrence_id ---")
+  UA_ARMS <- c("UA", "SC", "SSP")
+  
+  df_long <- imap(df_long, function(df, sheet_nm) {
+    if (is.null(df) || nrow(df) == 0) return(df)
+    
+    if (any(df$Study_Arm %in% UA_ARMS) ||
+        sheet_nm %in% c("Unscheduled Activities", "Setup & Closedown")) {
+      df$activity_occurrence_id <- 1L
+    } else {
+      grp_vars <- intersect(c("Study_Arm", "Activity", "Visit", "Visit_Label"), names(df))
+      df <- df %>%
+        group_by(across(all_of(grp_vars))) %>%
+        mutate(activity_occurrence_id = row_number()) %>%
+        ungroup()
+    }
+    
+    as.data.frame(df)
+  })
   
   # Optional: write final export
   if (!is.null(export_path)) {
