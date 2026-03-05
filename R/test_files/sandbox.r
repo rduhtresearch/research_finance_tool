@@ -6,15 +6,18 @@ library(DBI)
 library(duckdb)
 
 #-------------------------------------------------------------------------------
-input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/embrace.xlsx"
+# input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/embrace.xlsx"
+input_file  <- "/Users/tategraham/Documents/NHS/R scripts/Refactor/testing_data/BI.xlsx"
 
 processed_file <- process_workbook(
   input_path  = input_file,
   archive_dir = NULL,   # e.g. "/path/to/archive"
-  export_path = '/Users/tategraham/Documents/NHS/embrace_processed.xlsx',   # e.g. "/path/to/output.xlsx"
+  export_path = '/Users/tategraham/Documents/NHS/BI_processed.xlsx',   # e.g. "/path/to/output.xlsx"
   #db_dir      = dirname(input_file)
   db_dir      = '/Users/tategraham/Documents/NHS/research_finance_tool/data'
 )
+
+View(processed_file$`Unscheduled Activities`)
 
 View(processed_file$`Unscheduled Activities`)
 t <- processed_file$`Unscheduled Activities` |> filter(Activity == 'Recruitment Activities (per hour up to a maximum of £ 1,840)')
@@ -29,11 +32,266 @@ out <- generate_posting_plan(
 
 View(out)
 
-# then do whatever you want with it
-write_csv(out, "wherever/you/like.csv")
+out$contract_price <- round(out$contract_cost,0)
+
+# contract_price = the agreed/rounded figure (e.g. 1920.00)
+t <- out %>%
+  group_by(cpms_id, Visit, Study_Arm) %>%
+  mutate(
+    base_sum        = sum(posting_amount),
+    multiplier      = contract_price / base_sum,
+    adjusted_amount = round(posting_amount * multiplier, 2)
+  )
+# + residual fix on DIRECT
+
+View(t)
+
+
+library(dplyr)
+
+posting_lines_adjusted <- out %>%
+  group_by(cpms_id, Visit, Study_Arm) %>%
+  mutate(
+    base_sum       = sum(posting_amount, na.rm = TRUE),
+    contract_price = first(contract_price),
+    multiplier     = if_else(base_sum == 0, NA_real_, contract_price / base_sum),
+    
+    adjusted_amount = if_else(
+      base_sum == 0,
+      0,
+      round(posting_amount * multiplier, 2)
+    )
+  ) %>%
+  # residual (penny) fix so sum(adjusted_amount) == contract_price exactly
+  mutate(
+    residual = round(contract_price - sum(adjusted_amount, na.rm = TRUE), 2),
+    
+    # choose ONE row to absorb residual:
+    # - prefer DIRECT
+    # - if no DIRECT exists in the group, fall back to the first row
+    is_residual_row = case_when(
+      any(posting_line_type_id == "DIRECT") ~
+        (posting_line_type_id == "DIRECT") &
+        (row_number() == which(posting_line_type_id == "DIRECT")[1]),
+      TRUE ~ row_number() == 1L
+    ),
+    
+    adjusted_amount = if_else(
+      is_residual_row,
+      round(adjusted_amount + residual, 2),
+      adjusted_amount
+    )
+  ) %>%
+  # audit / sanity fields
+  mutate(
+    adjusted_sum_check = round(sum(adjusted_amount, na.rm = TRUE), 2),
+    diff_check         = round(contract_price - adjusted_sum_check, 2)
+  ) %>%
+  ungroup()
+
+p <- posting_lines_adjusted |> filter(Study_Arm == 'Survodutide ')
+View(p)
+View(posting_lines_adjusted)
+
+# Optional: list any groups that still don't reconcile (should be none)
+bad_groups <- posting_lines_adjusted %>%
+  distinct(cpms_id, Visit, Study_Arm, diff_check) %>%
+  filter(diff_check != 0)
+
+View(bad_groups)
+
+db_path = '/Users/tategraham/Documents/NHS/research_finance_tool/data/ict_local.duckdb'
+con <- dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE)
+
+ict_table <- dbGetQuery(con, "
+  SELECT *
+  FROM ict_costing_tbl
+")
+
+
+View(p)
+# Pharma costs need to be inlcuded in the visit grouping to reconcile costs 
+build_edge_template <- function(data) {
+  
+  # 1. Process the data first
+  processed_data <- data |> 
+    select(Study_Arm, Visit, adjusted_amount, sheet_name, study_name, Visit_Label) |>
+    summarise(
+      total = sum(adjusted_amount, na.rm = TRUE),
+      .by = c(study_name, Visit, Study_Arm)
+    ) |>
+    left_join(ict_table, by = c('Study_Arm' = 'Study_Arm', 'Visit' = 'Visit_Number')) |>
+    mutate(
+      Full_Visit_Name = paste0("VISIT - ", str_replace_all(Visit_Label, "\\.", " "))
+    )
+  
+  # 2. Map the processed data into the EDGE template structure
+  final_template <- processed_data |>
+    mutate(
+      `EDGE Project ID` = NA,  # Placeholder
+      `Template Name` = Study_Arm,    # Placeholder
+      `Template Level (Project | Participant | ProjectSite)` = "Participant",
+      `Project Arm (Participant only)` = NA,
+      `Project Site Name (ProjectSite only)` = NA,
+      `Cost Item Description` = Full_Visit_Name,
+      `Analysis Code` = NA,
+      `Cost Category` = 'Research Cost',
+      `Default Cost` = total,   # This maps your sum to the correct col
+      `Currency` = "GBP",
+      `Department` = NA,
+      `Overhead Cost` = NA,
+      `Time` = NA
+    ) |>
+    # 3. Select only the columns you want in the final output order
+    select(all_of(edge_cols))
+  
+  return(final_template)
+}
+
+# Now View will work perfectly
+View(build_edge_template(p))
+
+View(build_edge_template(p))
+names(t)
 
 
 
+
+edge_cols <- c(
+  "EDGE Project ID",
+  "Template Name",
+  "Template Level (Project | Participant | ProjectSite)",
+  "Project Arm (Participant only)",
+  "Project Site Name (ProjectSite only)",
+  "Cost Item Description",
+  "Analysis Code",
+  "Cost Category",
+  "Default Cost",
+  "Currency",
+  "Department",
+  "Overhead Cost",
+  "Time"
+)
+
+# Create an empty data frame with 0 rows
+edge_template <- data.frame(matrix(ncol = length(edge_cols), nrow = 0))
+
+# Assign the column names
+colnames(edge_template) <- edge_cols
+
+
+View(edge_template)
+
+
+
+library(dplyr)
+library(tidyr)
+
+make_activity_posting_summary_with_costcodes <- function(posting_lines) {
+  
+  pots <- c(
+    "DIRECT",
+    "CAPACITY_RD",
+    "INDIRECT_50_DELIVERY",
+    "INDIRECT_25_TRUST",
+    "INDIRECT_25_PI"
+  )
+  
+  base_keys <- c(
+    "cpms_id","study_name","Study_Arm",
+    "row_id","sheet_name","Visit","Visit_Label","Activity",
+    "scenario_id","row_category_auto","row_category","is_medic","staff_group"
+  )
+  
+  # Helper: choose a single cost code if possible
+  pick_cost_code <- function(x) {
+    x <- unique(na.omit(x))
+    if (length(x) == 0) return(NA_character_)
+    if (length(x) == 1) return(x)
+    "MULTIPLE"
+  }
+  
+  # Aggregate to (activity x pot)
+  agg <- posting_lines %>%
+    mutate(
+      posting_line_type_id = as.character(posting_line_type_id),
+      posting_amount = as.numeric(posting_amount)
+    ) %>%
+    filter(posting_line_type_id %in% pots) %>%
+    group_by(across(all_of(c(base_keys, "posting_line_type_id")))) %>%
+    summarise(
+      amount = sum(posting_amount, na.rm = TRUE),
+      cost_code = pick_cost_code(cost_code),
+      destination_entity = pick_cost_code(destination_entity),
+      destination_bucket = pick_cost_code(destination_bucket),
+      .groups = "drop"
+    )
+  
+  # Pivot AMOUNTS wide
+  amt_wide <- agg %>%
+    select(all_of(base_keys), posting_line_type_id, amount) %>%
+    pivot_wider(
+      names_from = posting_line_type_id,
+      values_from = amount,
+      values_fill = 0
+    ) %>%
+    rename(
+      DIRECT_amt = DIRECT,
+      CAPACITY_RD_amt = CAPACITY_RD,
+      INDIRECT_50_DELIVERY_amt = INDIRECT_50_DELIVERY,
+      INDIRECT_25_TRUST_amt = INDIRECT_25_TRUST,
+      INDIRECT_25_PI_amt = INDIRECT_25_PI
+    )
+  
+  # Pivot COST CODES wide
+  cc_wide <- agg %>%
+    select(all_of(base_keys), posting_line_type_id, cost_code) %>%
+    pivot_wider(
+      names_from = posting_line_type_id,
+      values_from = cost_code
+    ) %>%
+    rename(
+      DIRECT_cost_code = DIRECT,
+      CAPACITY_RD_cost_code = CAPACITY_RD,
+      INDIRECT_50_DELIVERY_cost_code = INDIRECT_50_DELIVERY,
+      INDIRECT_25_TRUST_cost_code = INDIRECT_25_TRUST,
+      INDIRECT_25_PI_cost_code = INDIRECT_25_PI
+    )
+  
+  # Optional: destinations wide too (if you want)
+  ent_wide <- agg %>%
+    select(all_of(base_keys), posting_line_type_id, destination_entity) %>%
+    pivot_wider(names_from = posting_line_type_id, values_from = destination_entity) %>%
+    rename(
+      DIRECT_dest = DIRECT,
+      CAPACITY_RD_dest = CAPACITY_RD,
+      INDIRECT_50_DELIVERY_dest = INDIRECT_50_DELIVERY,
+      INDIRECT_25_TRUST_dest = INDIRECT_25_TRUST,
+      INDIRECT_25_PI_dest = INDIRECT_25_PI
+    )
+  
+  out <- amt_wide %>%
+    left_join(cc_wide, by = base_keys) %>%
+    left_join(ent_wide, by = base_keys) %>%
+    mutate(
+      GRAND_TOTAL = DIRECT_amt + CAPACITY_RD_amt +
+        INDIRECT_50_DELIVERY_amt + INDIRECT_25_TRUST_amt + INDIRECT_25_PI_amt,
+      has_multiple_cost_codes =
+        DIRECT_cost_code == "MULTIPLE" |
+        CAPACITY_RD_cost_code == "MULTIPLE" |
+        INDIRECT_50_DELIVERY_cost_code == "MULTIPLE" |
+        INDIRECT_25_TRUST_cost_code == "MULTIPLE" |
+        INDIRECT_25_PI_cost_code == "MULTIPLE"
+    ) %>%
+    arrange(cpms_id, sheet_name, Visit, row_id)
+  
+  out
+}
+
+activity_view <- make_activity_posting_summary_with_costcodes(out)
+View(activity_view)
+# Usage:
+# activity_view <- make_activity_posting_summary_with_costcodes(posting_lines)
 
 #-------------------------------------------------------------------------------
 posting_path <- '/Users/tategraham/Documents/NHS/posting_plan.csv'

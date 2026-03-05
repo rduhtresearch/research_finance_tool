@@ -940,6 +940,11 @@ read_ict_workbook <- function(ict) {
             "The old overloaded Visit_Name may cause incorrect joins downstream.")
     df$Visit_Label <- if ("Visit" %in% names(df)) df$Visit else NA_character_
   }
+  if (!"staff_group" %in% names(df)) {
+    warning("read_ict_workbook(): 'staff_group' column missing -- defaulting to 1. ",
+            "Duplicate activities with different staff may not join correctly.")
+    df$staff_group <- 1L
+  }
   
   df
 }
@@ -1055,36 +1060,31 @@ join_ict_costs <- function(df, db_path) {
   }
   
   ict <- dbGetQuery(con, "
-    SELECT CPMS_ID, Visit_Number, Study_Arm, Activity_Name, ICT_Cost
+    SELECT CPMS_ID, Visit_Number, Study_Arm, Activity_Name, ICT_Cost,
+           activity_occurrence_id, staff_group
     FROM ict_costing_tbl
   ")
   
   # ── Row-level join: activity rows (Activity_Name NOT NULL) ─────────────────
-  # Matches UA/SSP/SC rows. The old system used the overloaded Visit_Name as
-  # Activity — now we join explicitly on Activity_Name.
-  # Deduplicate: expand_to_visit_rows_legacy() can write multiple rows per
-  # (CPMS_ID, Visit_Number, Study_Arm, Activity_Name) when occurrence > 1.
-  # For the join we only need the unit cost, so take distinct values.
-  ict_activity <- ict %>%
-    filter(!is.na(Activity_Name)) %>%
-    distinct(CPMS_ID, Visit_Number, Study_Arm, Activity_Name, .keep_all = TRUE)
+  # staff_group is the disambiguator: same activity at the same visit with
+  # different staff/costs gets a unique staff_group in pipeline_fixed.r.
+  # Including it in the join key gives a clean 1:1 match.
+  ict_activity <- ict %>% filter(!is.na(Activity_Name))
   
   df <- df %>%
     left_join(
       ict_activity %>% rename(contract_cost_activity = ICT_Cost),
-      by = c("cpms_id"   = "CPMS_ID",
-             "Visit"     = "Visit_Number",
-             "Study_Arm" = "Study_Arm",
-             "Activity"  = "Activity_Name")
+      by = c("cpms_id"     = "CPMS_ID",
+             "Visit"       = "Visit_Number",
+             "Study_Arm"   = "Study_Arm",
+             "Activity"    = "Activity_Name",
+             "staff_group" = "staff_group")
     )
   
   # ── Visit-level join: MFF summary rows (Activity_Name IS NULL) ─────────────
-  # Matches scheduled rows. Old system joined on Visit_Type = Visit_Name (column
-  # header). Now we join on Visit_Number + Study_Arm only (MFF rows have no activity).
-  # Deduplicate for the same reason.
+  # MFF rows don't have activity_occurrence_id, so join on visit-level key only.
   ict_visit <- ict %>%
     filter(is.na(Activity_Name)) %>%
-    distinct(CPMS_ID, Visit_Number, Study_Arm, .keep_all = TRUE) %>%
     select(CPMS_ID, Visit_Number, Study_Arm, ICT_Cost) %>%
     rename(contract_cost_visit = ICT_Cost)
   
@@ -1119,7 +1119,7 @@ apply_dist_rules <- function(df, dist_rules, scenario_id) {
     names(df),
     c("sheet_name", "Study_Arm", "Visit", "Activity", "cpms_id", "study_name",
       "row_id", "scenario_id", "row_category_auto", "calc_tag", "row_category",
-      "is_medic", "Visit_Label", "activity_occurrence_id",
+      "is_medic", "Visit_Label", "activity_occurrence_id", "staff_group",
       "provider_org", "pi_org", "Activity.Cost", "contract_cost")
   )
   
@@ -1261,7 +1261,7 @@ select_output_cols <- function(posting_plan) {
   )
   
   # Optional columns from corrected schema (present if pipeline_fixed.r was used)
-  optional <- c("sheet_name", "Visit_Label", "activity_occurrence_id", "contract_cost")
+  optional <- c("sheet_name", "Visit_Label", "activity_occurrence_id", "staff_group", "contract_cost")
   
   all_cols <- c(core, intersect(optional, names(posting_plan)))
   

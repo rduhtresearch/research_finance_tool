@@ -12,6 +12,20 @@
 #   - A new entry function process_workbook() wires the two stages together.
 #   - All other logic is identical to the originals — no renames, no rewrites.
 
+#!/usr/bin/env Rscript
+# pipeline_combined.R
+#
+# Merges refactor_1.R (Stage A: clean/standardise) and pipeline2.r (Stage B: reshape/normalise)
+# into a single in-memory pipeline.
+#
+# What changed vs the originals:
+#   - run_join_refactor() no longer writes the intermediate Excel file; instead it returns
+#     processed_sheets (the named list of cleaned dataframes) alongside the other outputs.
+#   - process_ict() gains an argument `df` so it can accept that in-memory list directly
+#     instead of reading from disk. When `df` is supplied, `input_path` is not read again.
+#   - A new entry function process_workbook() wires the two stages together.
+#   - All other logic is identical to the originals — no renames, no rewrites.
+
 source('/Users/tategraham/Documents/NHS/research_finance_tool/R/utils/add_study_arm.r')
 
 suppressPackageStartupMessages({
@@ -112,9 +126,18 @@ apply_flags_and_clean_legacy <- function(df, sheet_name, study_value, cpms_id) {
     df$Flag[i] <- current_flag
   }
   
-  df$Flag[is.na(df$Flag)] <- ifelse(sheet_name == "Setup & Closedown",
-                                    "Setup & Closedown",
-                                    "Scheduled / All Participants")
+  # df$Flag[is.na(df$Flag)] <- ifelse(sheet_name == "Setup & Closedown",
+  #                                   "Setup & Closedown",
+  #                                   "Scheduled / All Participants")
+  df$Flag[is.na(df$Flag)] <- ifelse(
+    sheet_name == "Setup & Closedown",
+    "Setup & Closedown",
+    ifelse(
+      sheet_name == "Unscheduled Activities",
+      "Unscheduled / Itemised Activities",
+      "Scheduled / All Participants"
+    )
+  )
   
   df <- df[!(df$Activity %in% value_list | is.na(df$Activity)), ]
   df <- df[!apply(df[, 1, drop = FALSE], 1, function(row) row == colnames(df)[1]), ]
@@ -157,7 +180,8 @@ extract_mff_lookup <- function(df, sheet_name, study_value, cpms_id) {
   
   tdf %>%
     select(CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost) %>%
-    mutate(activity_occurrence_id = NA_integer_)
+    mutate(activity_occurrence_id = NA_integer_,
+           staff_group            = NA_integer_)
 }
 
 expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_value, visit_label_lookup = NULL) {
@@ -209,6 +233,7 @@ expand_to_visit_rows_legacy <- function(df, study_value, cpms_id, study_arm_valu
         Activity_Name          = rep(df$Activity[i], n),
         ICT_Cost               = rep(cost_per_occ[i], n),
         activity_occurrence_id = seq_len(n),
+        staff_group            = rep(if ("staff_group" %in% names(df)) df$staff_group[i] else 1L, n),
         stringsAsFactors = FALSE
       )
     }
@@ -264,7 +289,8 @@ persist_ict_to_duckdb <- function(db_path, ict_cost_table) {
       Visit_Label            VARCHAR,          -- human-readable visit name (e.g. Screening, Day 30)
       Activity_Name          VARCHAR,          -- activity within the visit (NULL for MFF summary rows)
       ICT_Cost               DOUBLE  NOT NULL,
-      activity_occurrence_id INTEGER           -- NULL for MFF summary rows
+      activity_occurrence_id INTEGER,          -- NULL for MFF summary rows
+      staff_group            INTEGER           -- disambiguates same activity with different staff (NULL for MFF)
     )
   ")
   
@@ -281,11 +307,11 @@ persist_ict_to_duckdb <- function(db_path, ict_cost_table) {
   DBI::dbExecute(con, "
     INSERT INTO ict_costing_tbl (
       CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost,
-      activity_occurrence_id
+      activity_occurrence_id, staff_group
     )
     SELECT
       CPMS_ID, Study, Visit_Number, Study_Arm, Visit_Label, Activity_Name, ICT_Cost,
-      activity_occurrence_id
+      activity_occurrence_id, staff_group
     FROM stg_ict_costing_tbl
   ")
   
@@ -334,6 +360,18 @@ run_stage_a <- function(input_file, db_dir = NULL) {
     }
     
     df <- apply_flags_and_clean_legacy(df, sheet_name, study_value, cpms_id)
+    
+    # ── Assign staff_group: sequential ID for duplicate activities ──
+    # When the same Activity appears multiple times (different staff roles),
+    # staff_group disambiguates them. Assigned here so it flows consistently
+    # into BOTH the ICT costing table (via expand_to_visit_rows_legacy) and
+    # the processed workbook (via processed_sheets -> Stage B pivot).
+    # Grouped within (Activity, Flag) so numbering resets per activity per flag type.
+    df <- df %>%
+      group_by(Activity, Flag) %>%
+      mutate(staff_group = row_number()) %>%
+      ungroup() %>%
+      as.data.frame()
     
     ua_ssp_part <- build_ua_ssp_lookup_from_sheet(df, study_value, cpms_id, visit_label_lookup)
     if (nrow(ua_ssp_part) > 0) {
@@ -534,4 +572,5 @@ process_workbook <- function(input_path, archive_dir = NULL, export_path = NULL,
 #   archive_dir = NULL,   # e.g. "/path/to/archive"
 #   export_path = NULL,   # e.g. "/path/to/output.xlsx"
 #   db_dir      = dirname(input_file)
+# )
 # )
